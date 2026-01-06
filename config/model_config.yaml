@@ -1,0 +1,97 @@
+# Model Configuration for Real-Time Causal Band-Split RNN
+
+# Audio Parameters
+audio:
+  sample_rate: 44100
+  n_fft: 1408  # 32ms window at 44.1kHz
+  hop_length: 704  # 16ms hop (50% overlap)
+  win_length: 1408
+  window: 'hann'
+  center: false  # Left-aligned for causality
+  
+# Latency Requirements
+latency:
+  max_latency_ms: 40
+  window_size_ms: 32
+  hop_size_ms: 16
+  max_processing_time_ms: 16
+
+# Model Architecture
+model:
+  n_features: 128
+  n_layers: 12  # 6 sequence + 6 band modeling pairs
+  lstm_hidden: 256
+  mlp_hidden: 512
+  dropout: 0.0  # Disabled for inference
+  
+  # Band split configuration for vocals (adjust per target)
+  band_specs:
+    vocals:
+      - [0, 1000, 100]      # 0-1kHz, 100Hz bands (10 bands)
+      - [1000, 4000, 250]   # 1-4kHz, 250Hz bands (12 bands)
+      - [4000, 8000, 500]   # 4-8kHz, 500Hz bands (8 bands)
+      - [8000, 16000, 1000] # 8-16kHz, 1kHz bands (8 bands)
+      - [16000, 20000, 2000] # 16-20kHz, 2kHz bands (2 bands)
+      - [20000, 22050, 2050] # 20-22.05kHz, 1 band
+    
+    bass:
+      - [0, 500, 50]        # 0-500Hz, 50Hz bands (10 bands)
+      - [500, 1000, 100]    # 500-1000Hz, 100Hz bands (5 bands)
+      - [1000, 4000, 500]   # 1-4kHz, 500Hz bands (6 bands)
+      - [4000, 8000, 1000]  # 4-8kHz, 1kHz bands (4 bands)
+      - [8000, 16000, 2000] # 8-16kHz, 2kHz bands (4 bands)
+      - [16000, 22050, 6050] # 16-22.05kHz, 1 band
+    
+    drums:
+      - [0, 1000, 50]       # 0-1kHz, 50Hz bands (20 bands)
+      - [1000, 2000, 100]   # 1-2kHz, 100Hz bands (10 bands)
+      - [2000, 4000, 250]   # 2-4kHz, 250Hz bands (8 bands)
+      - [4000, 8000, 500]   # 4-8kHz, 500Hz bands (8 bands)
+      - [8000, 16000, 1000] # 8-16kHz, 1kHz bands (8 bands)
+      - [16000, 22050, 6050] # 16-22.05kHz, 1 band
+    
+    other:
+      - [0, 1000, 100]      # Same as vocals
+      - [1000, 4000, 250]
+      - [4000, 8000, 500]
+      - [8000, 16000, 1000]
+      - [16000, 20000, 2000]
+      - [20000, 22050, 2050]
+
+# Training Parameters
+training:
+  batch_size: 2
+  num_epochs: 100
+  learning_rate: 0.001
+  lr_decay: 0.98
+  lr_decay_step: 2
+  gradient_clip: 5.0
+  early_stop_patience: 10
+  
+  # Data
+  segment_length: 3.0  # seconds
+  num_workers: 4
+  
+  # Augmentation
+  augmentation:
+    pitch_shift: true
+    pitch_shift_range: [-2, -1, 1, 2]  # semitones
+    gain_scale: true
+    gain_range: [-10, 10]  # dB
+    mix_prob: 0.5  # Probability of using augmented mix
+  
+  # Loss weights
+  loss:
+    freq_weight: 1.0
+    time_weight: 1.0
+
+# Inference Parameters
+inference:
+  use_quantization: true
+  quantization_dtype: 'qint8'
+  device: 'cpu'  # Use CPU for laptop deployment
+  
+# Evaluation
+evaluation:
+  metrics: ['si_snr', 'sdr', 'rtf']
+  test_segment_length: 10.0  # seconds
