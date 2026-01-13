@@ -1,261 +1,373 @@
-"""
-Causal Band-Split RNN for Real-Time Processing
-
-Key modifications for causality and low latency:
-1. Unidirectional LSTM (only looks at past frames)
-2. Cumulative Layer Normalization (uses running statistics)
-3. Left-aligned STFT windows (no future look-ahead)
-4. State management for streaming inference
-"""
-
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Dict, List
-from .layers import BandSplitModule, MaskEstimationModule, CumulativeLayerNorm
+import numpy as np
+from .normalization import CumulativeLayerNorm, GroupNorm
 
 
-class CausalResidualRNN(nn.Module):
-    """
-    Causal Residual RNN block with unidirectional LSTM
-    Maintains hidden states for streaming
-    """
-    def __init__(self, input_size: int, hidden_size: int):
+class CausalBandSplitModule(nn.Module):
+    """Band split module that splits spectrogram into subbands."""
+    
+    def __init__(self, band_specs, feature_dim):
         super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
+        self.band_specs = band_specs  # List of (start_freq, end_freq)
+        self.num_bands = len(band_specs)
+        self.feature_dim = feature_dim
         
-        self.norm = CumulativeLayerNorm(input_size)
-        self.lstm = nn.LSTM(
-            input_size, 
-            hidden_size, 
-            num_layers=1, 
-            batch_first=True,
-            bidirectional=False  # CAUSAL: unidirectional only
-        )
-        self.fc = nn.Linear(hidden_size, input_size)
+        # Create normalization and FC layers for each band
+        self.band_norms = nn.ModuleList()
+        self.band_fcs = nn.ModuleList()
         
-    def forward(self, x: torch.Tensor, 
-                hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
-               ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        for start_f, end_f in band_specs:
+            bandwidth = end_f - start_f
+            self.band_norms.append(nn.LayerNorm(bandwidth * 2))  # *2 for real and imag
+            self.band_fcs.append(nn.Linear(bandwidth * 2, feature_dim))
+    
+    def forward(self, x):
         """
         Args:
-            x: (B, C, T) or (B, T, C)
-            hidden: Previous (h, c) states for LSTM
+            x: (B, F, T, 2) complex spectrogram
         Returns:
-            output: (B, C, T) or (B, T, C)
-            new_hidden: New (h, c) states
+            features: (B, K, N, T) band features
         """
+        B, F, T, _ = x.shape
+        band_features = []
+        
+        for i, (start_f, end_f) in enumerate(self.band_specs):
+            # Extract band
+            band = x[:, start_f:end_f, :, :]  # (B, Gi, T, 2)
+            band = band.reshape(B, -1, T).transpose(1, 2)  # (B, T, Gi*2)
+            
+            # Normalize and project
+            band = self.band_norms[i](band)  # (B, T, Gi*2)
+            band = self.band_fcs[i](band)  # (B, T, N)
+            
+            band_features.append(band.transpose(1, 2))  # (B, N, T)
+        
+        # Stack bands
+        features = torch.stack(band_features, dim=1)  # (B, K, N, T)
+        return features
+
+
+class CausalBandSequenceRNN(nn.Module):
+    """Causal RNN processing for band and sequence modeling."""
+    
+    def __init__(self, input_dim, hidden_dim, use_cumulative_norm=True):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.use_cumulative_norm = use_cumulative_norm
+        
+        if use_cumulative_norm:
+            self.norm = CumulativeLayerNorm(input_dim)
+        else:
+            self.norm = GroupNorm(1, input_dim)
+        
+        # Unidirectional LSTM for causal processing
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, input_dim)
+        
+    def forward(self, x, h_state=None, c_state=None, norm_stats=None):
+        """
+        Args:
+            x: (B, T, C) or (B, C, T)
+            h_state: (1, B, H) hidden state
+            c_state: (1, B, H) cell state
+            norm_stats: tuple of (running_mean, running_var, running_count)
+        Returns:
+            output: (B, T, C) or (B, C, T)
+            new_h_state: updated hidden state
+            new_c_state: updated cell state
+            new_norm_stats: updated normalization statistics
+        """
+        input_format = x.shape
+        if len(x.shape) == 3 and x.size(1) == self.input_dim:
+            # (B, C, T) -> (B, T, C)
+            x = x.transpose(1, 2)
+            transpose_back = True
+        else:
+            transpose_back = False
+        
         residual = x
         
-        # Ensure x is (B, T, C) for LSTM
-        if x.dim() == 3 and x.size(1) != x.size(2):
-            needs_transpose = True
-            x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
+        # Normalization
+        if self.use_cumulative_norm and norm_stats is not None:
+            x, new_mean, new_var, new_count = self.norm(x, *norm_stats)
+            new_norm_stats = (new_mean, new_var, new_count)
         else:
-            needs_transpose = False
+            if not self.use_cumulative_norm:
+                x = x.transpose(1, 2)  # (B, T, C) -> (B, C, T)
+            x = self.norm(x)
+            if not self.use_cumulative_norm:
+                x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
+            new_norm_stats = None
         
-        # Normalize
-        x = self.norm(x)
-        
-        # LSTM with state
-        if hidden is not None:
-            x, new_hidden = self.lstm(x, hidden)
+        # LSTM
+        if h_state is not None and c_state is not None:
+            x, (new_h_state, new_c_state) = self.lstm(x, (h_state, c_state))
         else:
-            x, new_hidden = self.lstm(x)
+            x, (new_h_state, new_c_state) = self.lstm(x)
         
-        # FC projection
+        # FC
         x = self.fc(x)
         
-        # Transpose back if needed
-        if needs_transpose:
-            x = x.transpose(1, 2)
-            residual = residual.transpose(1, 2) if residual.size(1) == x.size(2) else residual
+        # Residual
+        x = x + residual
         
-        return x + residual, new_hidden
+        if transpose_back:
+            x = x.transpose(1, 2)
+        
+        return x, new_h_state, new_c_state, new_norm_stats
+
+
+class CausalBandRNN(nn.Module):
+    """RNN across bands (non-causal in band dimension)."""
+    
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        
+        self.norm = GroupNorm(1, input_dim)
+        # Bidirectional for band dimension (non-causal)
+        self.lstm = nn.LSTM(input_dim, hidden_dim // 2, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(hidden_dim, input_dim)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: (B, K, N, T) band features
+        Returns:
+            output: (B, K, N, T)
+        """
+        B, K, N, T = x.shape
+        residual = x
+        
+        # Normalize (B, K, N, T)
+        x = self.norm(x.view(B * K, N, T)).view(B, K, N, T)
+        
+        # Process across bands for each time step
+        x = x.permute(0, 3, 1, 2)  # (B, T, K, N)
+        x = x.reshape(B * T, K, N)  # (B*T, K, N)
+        
+        x, _ = self.lstm(x)  # (B*T, K, H)
+        x = self.fc(x)  # (B*T, K, N)
+        
+        x = x.view(B, T, K, N)
+        x = x.permute(0, 2, 3, 1)  # (B, K, N, T)
+        
+        # Residual
+        x = x + residual
+        
+        return x
+
+
+class MaskEstimationModule(nn.Module):
+    """Estimate complex-valued masks for each band."""
+    
+    def __init__(self, band_specs, feature_dim, hidden_dim):
+        super().__init__()
+        self.band_specs = band_specs
+        self.num_bands = len(band_specs)
+        self.feature_dim = feature_dim
+        
+        self.band_norms = nn.ModuleList()
+        self.band_mlps = nn.ModuleList()
+        
+        for start_f, end_f in band_specs:
+            bandwidth = end_f - start_f
+            self.band_norms.append(nn.LayerNorm(feature_dim))
+            
+            # MLP with one hidden layer
+            self.band_mlps.append(nn.Sequential(
+                nn.Linear(feature_dim, hidden_dim),
+                nn.Tanh(),
+                nn.GLU(dim=-1)  # Splits hidden_dim in half and applies gating
+            ))
+            
+            # Output layer for complex mask (real and imag)
+            self.band_mlps[-1].add_module('output', nn.Linear(hidden_dim // 2, bandwidth * 2))
+    
+    def forward(self, x, mixture_spec):
+        """
+        Args:
+            x: (B, K, N, T) band features
+            mixture_spec: (B, F, T, 2) complex spectrogram
+        Returns:
+            separated: (B, F, T, 2) separated complex spectrogram
+        """
+        B, K, N, T = x.shape
+        F = mixture_spec.size(1)
+        
+        separated = torch.zeros_like(mixture_spec)
+        
+        for i, (start_f, end_f) in enumerate(self.band_specs):
+            band_feat = x[:, i, :, :]  # (B, N, T)
+            band_feat = band_feat.transpose(1, 2)  # (B, T, N)
+            
+            # Normalize
+            band_feat = self.band_norms[i](band_feat)  # (B, T, N)
+            
+            # MLP to get mask
+            mask = self.band_mlps[i](band_feat)  # (B, T, Gi*2)
+            
+            # Reshape mask
+            bandwidth = end_f - start_f
+            mask = mask.view(B, T, bandwidth, 2)  # (B, T, Gi, 2)
+            mask = mask.transpose(1, 2)  # (B, Gi, T, 2)
+            
+            # Apply mask
+            band_mixture = mixture_spec[:, start_f:end_f, :, :]  # (B, Gi, T, 2)
+            separated[:, start_f:end_f, :, :] = band_mixture * mask
+        
+        return separated
 
 
 class CausalBSRNN(nn.Module):
-    """
-    Causal Band-Split RNN for Real-Time Music Source Separation
+    """Causal Band-Split RNN for real-time source separation."""
     
-    Architecture (Causal Version):
-    1. Band Split Module: Splits spectrogram into K subbands
-       - Uses cumulative layer normalization
-    2. Sequence Modeling: Unidirectional LSTM across time (per band)
-       - Only looks at past frames
-       - Maintains hidden states for streaming
-    3. Band Modeling: Unidirectional LSTM across bands (per frame)
-       - Processes bands in order
-       - Maintains hidden states for streaming
-    4. Mask Estimation: Generates complex T-F masks per band
-       - Uses cumulative normalization
-    
-    Key differences from original BSRNN:
-    - Unidirectional LSTM (causal): ~50ms algorithmic latency vs ~200ms
-    - Cumulative normalization: Uses running statistics, no future frames
-    - Left-aligned STFT: No centering, immediate processing
-    - State management: Can process streaming audio chunk-by-chunk
-    - Quantization support: 8-bit inference for faster processing
-    """
-    
-    def __init__(self, band_specs: list, n_features: int = 128,
-                 n_layers: int = 12, lstm_hidden: int = 256,
-                 mlp_hidden: int = 512, sample_rate: int = 44100,
-                 n_fft: int = 1408, hop_length: int = 704):
+    def __init__(self, n_fft=1024, hop_length=512, band_specs=None, 
+                 feature_dim=128, num_repeat=12, hidden_dim=256):
         super().__init__()
-        
-        self.band_specs = band_specs
-        self.n_features = n_features
-        self.sample_rate = sample_rate
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.n_layers = n_layers
-        self.lstm_hidden = lstm_hidden
+        self.num_freq_bins = n_fft // 2 + 1
+        self.feature_dim = feature_dim
+        self.num_repeat = num_repeat
+        self.hidden_dim = hidden_dim
         
-        # Band split module (with cumulative normalization)
-        self.band_split = BandSplitModule(band_specs, n_features)
-        self.n_bands = self.band_split.n_bands
+        # Default band specs for vocals (from paper - V7 config)
+        if band_specs is None:
+            band_specs = self._create_vocal_band_specs()
+        self.band_specs = band_specs
+        self.num_bands = len(band_specs)
         
-        # Interleaved sequence and band modeling (causal RNNs)
-        self.sequence_rnns = nn.ModuleList([
-            CausalResidualRNN(n_features, lstm_hidden)
-            for _ in range(n_layers // 2)
-        ])
+        # Modules
+        self.band_split = CausalBandSplitModule(band_specs, feature_dim)
         
-        self.band_rnns = nn.ModuleList([
-            CausalResidualRNN(n_features, lstm_hidden)
-            for _ in range(n_layers // 2)
-        ])
+        # Interleaved sequence and band RNNs
+        self.sequence_rnns = nn.ModuleList()
+        self.band_rnns = nn.ModuleList()
         
-        # Mask estimation module (with cumulative normalization)
-        self.mask_estimation = MaskEstimationModule(band_specs, n_features, mlp_hidden)
+        for _ in range(num_repeat):
+            self.sequence_rnns.append(
+                CausalBandSequenceRNN(feature_dim, hidden_dim, use_cumulative_norm=True)
+            )
+            self.band_rnns.append(
+                CausalBandRNN(feature_dim, hidden_dim)
+            )
         
-    def forward(self, x: torch.Tensor, 
-                states: Optional[Dict[str, List[Tuple[torch.Tensor, torch.Tensor]]]] = None
-               ) -> Tuple[torch.Tensor, Dict[str, List[Tuple[torch.Tensor, torch.Tensor]]]]:
+        self.mask_estimation = MaskEstimationModule(band_specs, feature_dim, hidden_dim * 4)
+        
+        # Window for STFT
+        self.register_buffer('window', torch.hann_window(n_fft))
+    
+    def _create_vocal_band_specs(self):
+        """Create band specifications for vocals (V7 from paper)."""
+        band_specs = []
+        
+        # Below 1k Hz: 100 Hz bandwidth
+        for i in range(0, 1000, 100):
+            start_bin = int(i * self.num_freq_bins / (44100 / 2))
+            end_bin = int((i + 100) * self.num_freq_bins / (44100 / 2))
+            band_specs.append((start_bin, end_bin))
+        
+        # 1k - 4k Hz: 250 Hz bandwidth
+        for i in range(1000, 4000, 250):
+            start_bin = int(i * self.num_freq_bins / (44100 / 2))
+            end_bin = int((i + 250) * self.num_freq_bins / (44100 / 2))
+            band_specs.append((start_bin, end_bin))
+        
+        # 4k - 8k Hz: 500 Hz bandwidth
+        for i in range(4000, 8000, 500):
+            start_bin = int(i * self.num_freq_bins / (44100 / 2))
+            end_bin = int((i + 500) * self.num_freq_bins / (44100 / 2))
+            band_specs.append((start_bin, end_bin))
+        
+        # 8k - 16k Hz: 1k Hz bandwidth
+        for i in range(8000, 16000, 1000):
+            start_bin = int(i * self.num_freq_bins / (44100 / 2))
+            end_bin = int((i + 1000) * self.num_freq_bins / (44100 / 2))
+            band_specs.append((start_bin, end_bin))
+        
+        # 16k - 20k Hz: 2k Hz bandwidth
+        start_bin = int(16000 * self.num_freq_bins / (44100 / 2))
+        end_bin = int(20000 * self.num_freq_bins / (44100 / 2))
+        band_specs.append((start_bin, end_bin))
+        
+        # Above 20k Hz: rest
+        band_specs.append((end_bin, self.num_freq_bins))
+        
+        return band_specs
+    
+    def forward(self, mixture, states=None):
         """
-        Forward pass with state management for streaming
-        
         Args:
-            x: Complex spectrogram (B, F, T)
-            states: Dictionary containing 'sequence' and 'band' LSTM states
+            mixture: (B, F, T, 2) complex spectrogram
+            states: dict of RNN states for streaming
         Returns:
-            output: Separated source spectrogram (B, F, T)
-            new_states: Updated LSTM states
+            separated: (B, F, T, 2) separated complex spectrogram
+            new_states: updated states for streaming
         """
-        # Initialize states if not provided
-        if states is None:
-            states = self._init_states(x.device, x.size(0))
-        
         # Band split
-        z = self.band_split(x, self.sample_rate)  # (B, N, K, T)
+        features = self.band_split(mixture)  # (B, K, N, T)
         
-        B, N, K, T = z.shape
+        if states is None:
+            states = self._init_states(mixture.size(0), mixture.device)
         
-        # New states to return
-        new_states = {'sequence': [], 'band': []}
+        new_states = {}
         
         # Interleaved sequence and band modeling
-        for layer_idx, (seq_rnn, band_rnn) in enumerate(zip(self.sequence_rnns, self.band_rnns)):
-            # Sequence modeling: process each band across time
-            z_seq = z.permute(0, 2, 1, 3).reshape(B * K, N, T)  # (B*K, N, T)
+        for i in range(self.num_repeat):
+            # Sequence RNN for each band
+            B, K, N, T = features.shape
+            seq_output = []
             
-            # Get states for this layer
-            seq_state = states['sequence'][layer_idx] if layer_idx < len(states['sequence']) else None
+            for k in range(K):
+                band_feat = features[:, k, :, :]  # (B, N, T)
+                
+                h_key = f'seq_{i}_band_{k}_h'
+                c_key = f'seq_{i}_band_{k}_c'
+                norm_key = f'seq_{i}_band_{k}_norm'
+                
+                out, new_h, new_c, new_norm = self.sequence_rnns[i](
+                    band_feat,
+                    states.get(h_key),
+                    states.get(c_key),
+                    states.get(norm_key)
+                )
+                
+                new_states[h_key] = new_h
+                new_states[c_key] = new_c
+                if new_norm is not None:
+                    new_states[norm_key] = new_norm
+                
+                seq_output.append(out)
             
-            z_seq, new_seq_state = seq_rnn(z_seq, seq_state)
-            new_states['sequence'].append(new_seq_state)
+            features = torch.stack(seq_output, dim=1)  # (B, K, N, T)
             
-            z = z_seq.reshape(B, K, N, T).permute(0, 2, 1, 3)  # (B, N, K, T)
-            
-            # Band modeling: process each frame across bands
-            z_band = z.permute(0, 3, 1, 2).reshape(B * T, N, K)  # (B*T, N, K)
-            
-            # Get states for this layer
-            band_state = states['band'][layer_idx] if layer_idx < len(states['band']) else None
-            
-            z_band, new_band_state = band_rnn(z_band, band_state)
-            new_states['band'].append(new_band_state)
-            
-            z = z_band.reshape(B, T, N, K).permute(0, 2, 3, 1)  # (B, N, K, T)
+            # Band RNN
+            features = self.band_rnns[i](features)  # (B, K, N, T)
         
         # Mask estimation
-        mask = self.mask_estimation(z, self.sample_rate, self.n_fft)
+        separated = self.mask_estimation(features, mixture)
         
-        # Apply mask
-        output = x * mask
-        
-        return output, new_states
+        return separated, new_states
     
-    def _init_states(self, device: torch.device, batch_size: int
-                    ) -> Dict[str, List[Tuple[torch.Tensor, torch.Tensor]]]:
-        """Initialize LSTM states for streaming"""
-        states = {'sequence': [], 'band': []}
-        
-        # Sequence RNN states (one state per band)
-        for _ in range(len(self.sequence_rnns)):
-            h = torch.zeros(1, batch_size * self.n_bands, self.lstm_hidden, device=device)
-            c = torch.zeros(1, batch_size * self.n_bands, self.lstm_hidden, device=device)
-            states['sequence'].append((h, c))
-        
-        # Band RNN states (one state per time frame, but we use 1 for streaming)
-        for _ in range(len(self.band_rnns)):
-            h = torch.zeros(1, batch_size, self.lstm_hidden, device=device)
-            c = torch.zeros(1, batch_size, self.lstm_hidden, device=device)
-            states['band'].append((h, c))
+    def _init_states(self, batch_size, device):
+        """Initialize RNN states."""
+        states = {}
+        for i in range(self.num_repeat):
+            for k in range(self.num_bands):
+                h_key = f'seq_{i}_band_{k}_h'
+                c_key = f'seq_{i}_band_{k}_c'
+                norm_key = f'seq_{i}_band_{k}_norm'
+                
+                states[h_key] = torch.zeros(1, batch_size, self.hidden_dim, device=device)
+                states[c_key] = torch.zeros(1, batch_size, self.hidden_dim, device=device)
+                states[norm_key] = (
+                    torch.zeros(batch_size, self.feature_dim, device=device),
+                    torch.zeros(batch_size, self.feature_dim, device=device),
+                    torch.zeros(batch_size, device=device)
+                )
         
         return states
-    
-    def reset_states(self):
-        """Reset running statistics in normalization layers"""
-        for module in self.modules():
-            if isinstance(module, CumulativeLayerNorm):
-                module.running_mean.zero_()
-                module.running_var.fill_(1.0)
-                module.num_batches_tracked.zero_()
-
-
-class MultiTargetCausalBSRNN(nn.Module):
-    """
-    Multi-target causal BSRNN for separating vocals, drums, bass, and other
-    """
-    def __init__(self, config: dict):
-        super().__init__()
-        
-        self.targets = ['vocals', 'drums', 'bass', 'other']
-        self.sample_rate = config['audio']['sample_rate']
-        self.n_fft = config['audio']['n_fft']
-        self.hop_length = config['audio']['hop_length']
-        
-        # Create separate model for each target
-        self.models = nn.ModuleDict()
-        for target in self.targets:
-            band_specs = config['model']['band_specs'][target]
-            self.models[target] = CausalBSRNN(
-                band_specs=band_specs,
-                n_features=config['model']['n_features'],
-                n_layers=config['model']['n_layers'],
-                lstm_hidden=config['model']['lstm_hidden'],
-                mlp_hidden=config['model']['mlp_hidden'],
-                sample_rate=self.sample_rate,
-                n_fft=self.n_fft,
-                hop_length=self.hop_length
-            )
-    
-    def forward(self, x: torch.Tensor, target: str,
-                states: Optional[Dict] = None) -> Tuple[torch.Tensor, Dict]:
-        """
-        Args:
-            x: Complex spectrogram (B, F, T)
-            target: Target source ('vocals', 'drums', 'bass', 'other')
-            states: LSTM states for streaming
-        """
-        return self.models[target](x, states)
-    
-    def reset_states(self, target: Optional[str] = None):
-        """Reset states for one or all targets"""
-        if target:
-            self.models[target].reset_states()
-        else:
-            for model in self.models.values():
-                model.reset_states()

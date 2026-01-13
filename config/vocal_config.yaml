@@ -1,0 +1,32 @@
+# Causal BSRNN Configuration for Source Separation
+
+model:
+  n_fft: 1024
+  hop_length: 512
+  feature_dim: 128
+  num_repeat: 12  # Number of sequence-band RNN pairs
+  hidden_dim: 256
+
+data:
+  sample_rate: 44100
+  segment_length: 3.0  # seconds
+  use_augmentation: false  # Set to true to enable augmentation
+  
+  augmentation:
+    pitch_shift: false  # Enable pitch shifting
+    extra_gain: false   # Enable extra gain variation
+    automix: false      # Enable automix-style remixing
+
+training:
+  batch_size: 2
+  num_workers: 4
+  num_epochs: 100
+  learning_rate: 0.001
+  lr_decay: 0.98  # Applied every 2 epochs
+  max_grad_norm: 5.0
+  early_stopping_patience: 10
+  
+  val_chunk_size: 1323000  # ~30 seconds at 44.1kHz
+  
+  checkpoint_dir: "checkpoints"
+  device: "cuda"  # or "cpu"

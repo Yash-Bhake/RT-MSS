@@ -1,219 +1,69 @@
-"""
-Loss functions for music source separation
-"""
-
 import torch
 import torch.nn as nn
 
 
-class FrequencyDomainLoss(nn.Module):
-    """
-    Frequency domain loss (MAE on real and imaginary parts)
-    """
+class MultiDomainLoss(nn.Module):
+    """Multi-domain loss combining frequency and time domain MAE."""
     
-    def __init__(self):
-        super().__init__()
-        self.mae = nn.L1Loss()
-    
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            pred: Predicted complex spectrogram (B, C, F, T)
-            target: Target complex spectrogram (B, C, F, T)
-        Returns:
-            Loss value
-        """
-        # Separate real and imaginary parts
-        pred_real = pred.real
-        pred_imag = pred.imag
-        target_real = target.real
-        target_imag = target.imag
-        
-        # MAE on both parts
-        loss_real = self.mae(pred_real, target_real)
-        loss_imag = self.mae(pred_imag, target_imag)
-        
-        return loss_real + loss_imag
-
-
-class TimeDomainLoss(nn.Module):
-    """
-    Time domain loss (MAE on waveform)
-    """
-    
-    def __init__(self, n_fft: int = 1408, hop_length: int = 704):
-        super().__init__()
-        self.mae = nn.L1Loss()
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.window = torch.hann_window(n_fft)
-    
-    def forward(self, pred_spec: torch.Tensor, target_spec: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            pred_spec: Predicted complex spectrogram (B, C, F, T)
-            target_spec: Target complex spectrogram (B, C, F, T)
-        Returns:
-            Loss value
-        """
-        B, C = pred_spec.size(0), pred_spec.size(1)
-        
-        # Inverse STFT
-        pred_audio = []
-        target_audio = []
-        
-        window = self.window.to(pred_spec.device)
-        
-        for b in range(B):
-            # Inverse STFT for each channel
-            pred_wav = torch.istft(
-                pred_spec[b],
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                win_length=self.n_fft,
-                window=window,
-                center=False,
-                return_complex=False
-            )
-            
-            target_wav = torch.istft(
-                target_spec[b],
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                win_length=self.n_fft,
-                window=window,
-                center=False,
-                return_complex=False
-            )
-            
-            pred_audio.append(pred_wav)
-            target_audio.append(target_wav)
-        
-        pred_audio = torch.stack(pred_audio, dim=0)
-        target_audio = torch.stack(target_audio, dim=0)
-        
-        # MAE in time domain
-        return self.mae(pred_audio, target_audio)
-
-
-class CombinedLoss(nn.Module):
-    """
-    Combined frequency and time domain loss
-    """
-    
-    def __init__(self, freq_weight: float = 1.0, time_weight: float = 1.0,
-                 n_fft: int = 1408, hop_length: int = 704):
-        super().__init__()
-        self.freq_weight = freq_weight
-        self.time_weight = time_weight
-        
-        self.freq_loss = FrequencyDomainLoss()
-        self.time_loss = TimeDomainLoss(n_fft, hop_length)
-    
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
-        """
-        Args:
-            pred: Predicted complex spectrogram (B, C, F, T)
-            target: Target complex spectrogram (B, C, F, T)
-        Returns:
-            Dictionary with total loss and individual losses
-        """
-        freq_loss = self.freq_loss(pred, target)
-        time_loss = self.time_loss(pred, target)
-        
-        total_loss = self.freq_weight * freq_loss + self.time_weight * time_loss
-        
-        return {
-            'total': total_loss,
-            'freq': freq_loss.item(),
-            'time': time_loss.item()
-        }
-
-
-def si_snr_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Scale-Invariant Signal-to-Noise Ratio loss
-    
-    Args:
-        pred: Predicted waveform (B, C, T)
-        target: Target waveform (B, C, T)
-        eps: Small constant for numerical stability
-    Returns:
-        Negative SI-SNR (lower is better)
-    """
-    # Zero-mean
-    target = target - torch.mean(target, dim=-1, keepdim=True)
-    pred = pred - torch.mean(pred, dim=-1, keepdim=True)
-    
-    # Compute scaling factor
-    s_target = torch.sum(pred * target, dim=-1, keepdim=True) / \
-               (torch.sum(target ** 2, dim=-1, keepdim=True) + eps)
-    
-    # Scaled target
-    s_target = s_target * target
-    
-    # Compute SI-SNR
-    si_snr = 10 * torch.log10(
-        (torch.sum(s_target ** 2, dim=-1) + eps) /
-        (torch.sum((pred - s_target) ** 2, dim=-1) + eps)
-    )
-    
-    # Return negative for minimization
-    return -torch.mean(si_snr)
-
-
-class SISDRLoss(nn.Module):
-    """
-    Scale-Invariant Signal-to-Distortion Ratio loss (same as SI-SNR)
-    """
-    
-    def __init__(self, n_fft: int = 1408, hop_length: int = 704):
+    def __init__(self, n_fft=1024, hop_length=512, device='cuda'):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.window = torch.hann_window(n_fft)
+        self.device = device
+        
+        # Register window
+        self.register_buffer('window', torch.hann_window(n_fft))
     
-    def forward(self, pred_spec: torch.Tensor, target_spec: torch.Tensor) -> torch.Tensor:
+    def forward(self, pred_spec, target_spec, pred_audio=None, target_audio=None):
         """
+        Compute multi-domain loss.
+        
         Args:
-            pred_spec: Predicted complex spectrogram (B, C, F, T)
-            target_spec: Target complex spectrogram (B, C, F, T)
+            pred_spec: (B, F, T, 2) predicted spectrogram
+            target_spec: (B, F, T, 2) target spectrogram
+            pred_audio: (B, T) predicted audio (optional)
+            target_audio: (B, T) target audio (optional)
+        
         Returns:
-            Negative SI-SDR
+            total_loss: Combined loss
         """
-        B, C = pred_spec.size(0), pred_spec.size(1)
+        # Frequency domain loss (MAE on real and imaginary parts)
+        freq_loss_real = torch.mean(torch.abs(pred_spec[..., 0] - target_spec[..., 0]))
+        freq_loss_imag = torch.mean(torch.abs(pred_spec[..., 1] - target_spec[..., 1]))
+        freq_loss = freq_loss_real + freq_loss_imag
         
-        # Convert to time domain
-        pred_audio = []
-        target_audio = []
-        
-        window = self.window.to(pred_spec.device)
-        
-        for b in range(B):
-            pred_wav = torch.istft(
-                pred_spec[b],
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                win_length=self.n_fft,
-                window=window,
-                center=False,
-                return_complex=False
-            )
+        # Time domain loss
+        if pred_audio is not None and target_audio is not None:
+            time_loss = torch.mean(torch.abs(pred_audio - target_audio))
+        else:
+            # Convert spectrograms to audio
+            pred_audio = self._spec_to_audio(pred_spec)
+            target_audio = self._spec_to_audio(target_spec)
             
-            target_wav = torch.istft(
-                target_spec[b],
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                win_length=self.n_fft,
-                window=window,
-                center=False,
-                return_complex=False
-            )
+            # Ensure same length
+            min_len = min(pred_audio.size(-1), target_audio.size(-1))
+            pred_audio = pred_audio[..., :min_len]
+            target_audio = target_audio[..., :min_len]
             
-            pred_audio.append(pred_wav)
-            target_audio.append(target_wav)
+            time_loss = torch.mean(torch.abs(pred_audio - target_audio))
         
-        pred_audio = torch.stack(pred_audio, dim=0)
-        target_audio = torch.stack(target_audio, dim=0)
+        # Combined loss
+        total_loss = freq_loss + time_loss
         
-        return si_snr_loss(pred_audio, target_audio)
+        return total_loss
+    
+    def _spec_to_audio(self, spec):
+        """Convert spectrogram to audio."""
+        # spec: (B, F, T, 2)
+        spec = spec.permute(0, 1, 3, 2)  # (B, F, 2, T)
+        spec_complex = torch.view_as_complex(spec.contiguous())
+        
+        audio = torch.istft(
+            spec_complex,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            window=self.window,
+            center=False
+        )
+        
+        return audio
