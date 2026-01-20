@@ -3,9 +3,9 @@
 model:
   n_fft: 1024
   hop_length: 512
-  feature_dim: 128
-  num_repeat: 12  # Number of sequence-band RNN pairs
-  hidden_dim: 256
+  feature_dim: 64
+  num_repeat: 6  # Number of sequence-band RNN pairs
+  hidden_dim: 128
 
 data:
   sample_rate: 44100
@@ -18,15 +18,15 @@ data:
     automix: false      # Enable automix-style remixing
 
 training:
-  batch_size: 2
+  batch_size: 4
   num_workers: 4
-  num_epochs: 100
+  num_epochs: 50
   learning_rate: 0.001
   lr_decay: 0.98  # Applied every 2 epochs
   max_grad_norm: 5.0
   early_stopping_patience: 10
   
-  val_chunk_size: 1323000  # ~30 seconds at 44.1kHz
+  val_chunk_size: 1323000  # ~30 seconds at sr
   
   checkpoint_dir: "checkpoints"
   device: "cuda"  # or "cpu"

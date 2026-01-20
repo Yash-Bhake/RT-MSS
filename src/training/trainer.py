@@ -199,7 +199,7 @@ class Trainer:
             hop_length=self.model.hop_length,
             window=self.model.window,
             center=False,  # Causal
-            return_complex=False
+            return_complex=True
         )
         
         # Convert to (B, F, T, 2) format

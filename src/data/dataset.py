@@ -5,6 +5,7 @@ import torchaudio
 import numpy as np
 from torch.utils.data import Dataset
 from pathlib import Path
+import soundfile as sf
 
 
 class MUSDB18Dataset(Dataset):
@@ -47,18 +48,23 @@ class MUSDB18Dataset(Dataset):
         else:
             # Fixed song for validation/test
             return self._load_test_sample(idx)
+        
+    def _load_audio(self, path):
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)
+        assert sr == self.sample_rate, f"Sample rate mismatch: {sr}"
+        return torch.from_numpy(audio.T)  # (1, N)
     
     def _load_training_sample(self, song_idx):
         """Load a random segment from a song with augmentation."""
         song_dir = self.songs[song_idx]
         
         # Load stems
-        vocals, sr = torchaudio.load(song_dir / 'vocals.wav')
-        bass, _ = torchaudio.load(song_dir / 'bass.wav')
-        drums, _ = torchaudio.load(song_dir / 'drums.wav')
-        other, _ = torchaudio.load(song_dir / 'other.wav')
+        vocals = self._load_audio(song_dir / 'vocals.wav')
+        bass = self._load_audio(song_dir / 'bass.wav')
+        drums = self._load_audio(song_dir / 'drums.wav')
+        other = self._load_audio(song_dir / 'other.wav')
         
-        assert sr == self.sample_rate, f"Sample rate mismatch: {sr} vs {self.sample_rate}"
+        assert vocals.size(1) == bass.size(1) == drums.size(1) == other.size(1), "Stem lengths mismatch"
         
         # Convert to mono if stereo (average channels)
         if vocals.size(0) == 2:
@@ -105,10 +111,10 @@ class MUSDB18Dataset(Dataset):
             )
         
         # Random gain scaling [-10, 10] dB
-        for stem in [vocal_seg, bass_seg, drums_seg, other_seg]:
-            gain_db = random.uniform(-10, 10)
-            gain = 10 ** (gain_db / 20)
-            stem *= gain
+        # for stem in [vocal_seg, bass_seg, drums_seg, other_seg]:
+        #     gain_db = random.uniform(-10, 10)
+        #     gain = 10 ** (gain_db / 20)
+        #     stem *= gain
         
         # Mix
         mixture = vocal_seg + bass_seg + drums_seg + other_seg

@@ -1,0 +1,149 @@
+# Configuration Presets for Different Hardware
+
+# ====================================================================
+# QUICK TEST - For validation only (~3-4 hours on CPU)
+# ====================================================================
+quick_test:
+  model:
+    n_fft: 1024
+    hop_length: 512
+    feature_dim: 64
+    num_repeat: 3
+    hidden_dim: 128
+  
+  data:
+    sample_rate: 44100
+    segment_length: 3.0
+    use_augmentation: false
+  
+  training:
+    batch_size: 1
+    num_workers: 2
+    num_epochs: 10
+    learning_rate: 0.001
+    lr_decay: 0.98
+    max_grad_norm: 5.0
+    early_stopping_patience: 5
+    val_chunk_size: 1323000
+    checkpoint_dir: "checkpoints"
+    device: "cpu"
+
+# ====================================================================
+# SMALL - CPU friendly (~75 hours for 100 epochs, ~38 hours for 50)
+# ====================================================================
+small:
+  model:
+    n_fft: 1024
+    hop_length: 512
+    feature_dim: 128
+    num_repeat: 6
+    hidden_dim: 128
+  
+  data:
+    sample_rate: 44100
+    segment_length: 3.0
+    use_augmentation: false
+  
+  training:
+    batch_size: 2
+    num_workers: 4
+    num_epochs: 50
+    learning_rate: 0.001
+    lr_decay: 0.98
+    max_grad_norm: 5.0
+    early_stopping_patience: 10
+    val_chunk_size: 1323000
+    checkpoint_dir: "checkpoints"
+    device: "cpu"
+
+# ====================================================================
+# DEFAULT - Best for GPU (~13 hours on RTX 3090)
+# ====================================================================
+default:
+  model:
+    n_fft: 1024
+    hop_length: 512
+    feature_dim: 128
+    num_repeat: 12
+    hidden_dim: 256
+  
+  data:
+    sample_rate: 44100
+    segment_length: 3.0
+    use_augmentation: false
+  
+  training:
+    batch_size: 2
+    num_workers: 4
+    num_epochs: 100
+    learning_rate: 0.001
+    lr_decay: 0.98
+    max_grad_norm: 5.0
+    early_stopping_patience: 10
+    val_chunk_size: 1323000
+    checkpoint_dir: "checkpoints"
+    device: "cuda"
+
+# ====================================================================
+# DEFAULT + AUGMENTATION - For better generalization
+# ====================================================================
+default_aug:
+  model:
+    n_fft: 2048
+    hop_length: 512
+    feature_dim: 128
+    num_repeat: 12
+    hidden_dim: 128
+  
+  data:
+    sample_rate: 44100
+    segment_length: 3.0
+    use_augmentation: false
+    # augmentation:
+    #   pitch_shift: false
+    #   extra_gain: false
+    #   automix: false
+  
+  training:
+    batch_size: 2
+    num_workers: 4
+    num_epochs: 100
+    learning_rate: 0.001
+    lr_decay: 0.98
+    max_grad_norm: 5.0
+    early_stopping_patience: 10
+    val_chunk_size: 1323000
+    checkpoint_dir: "checkpoints"
+    device: "cuda"
+
+# ====================================================================
+# LARGE - Maximum quality (~25 hours on A100)
+# ====================================================================
+large:
+  model:
+    n_fft: 1024
+    hop_length: 512
+    feature_dim: 192
+    num_repeat: 16
+    hidden_dim: 384
+  
+  data:
+    sample_rate: 44100
+    segment_length: 3.0
+    use_augmentation: false
+    # augmentation:
+    #   pitch_shift: false
+    #   extra_gain: false
+    #   automix: false
+  
+  training:
+    batch_size: 2
+    num_workers: 4
+    num_epochs: 100
+    learning_rate: 0.001
+    lr_decay: 0.98
+    max_grad_norm: 5.0
+    early_stopping_patience: 10
+    val_chunk_size: 1323000
+    checkpoint_dir: "checkpoints"
+    device: "cuda"

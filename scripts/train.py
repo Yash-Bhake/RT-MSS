@@ -17,9 +17,9 @@ from src.training.trainer import Trainer
 
 def main():
     parser = argparse.ArgumentParser(description='Train Causal BSRNN')
-    parser.add_argument('--config', type=str, default='configs/vocal_config.yaml',
+    parser.add_argument('--config', type=str, default='config/vocal_config.yaml',
                         help='Path to config file')
-    parser.add_argument('--data_dir', type=str, required=True,
+    parser.add_argument('--data_dir', type=str, required=True, default ='src/data/musdb18_sampled',
                         help='Path to MUSDB18 dataset')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint to resume from')

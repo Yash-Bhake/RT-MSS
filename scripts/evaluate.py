@@ -78,7 +78,8 @@ def process_audio(model, audio, chunk_size, device):
         hop_length=hop_length,
         window=model.window.to(device),
         center=False,
-        return_complex=False
+        return_complex=False,
+        return_complex=True
     )
     
     # Convert to (B, F, T, 2)
