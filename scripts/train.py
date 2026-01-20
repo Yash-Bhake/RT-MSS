@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train Causal BSRNN')
     parser.add_argument('--config', type=str, default='config/vocal_config.yaml',
                         help='Path to config file')
-    parser.add_argument('--data_dir', type=str, required=True, default ='src/data/musdb18_sampled',
+    parser.add_argument('--data_dir', type=str, required=True, default ='src/data/musdb18hq',
                         help='Path to MUSDB18 dataset')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint to resume from')
