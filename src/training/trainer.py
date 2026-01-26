@@ -170,6 +170,9 @@ class Trainer:
                 chunk = torch.nn.functional.pad(chunk, (0, pad_len))
             else:
                 chunk = mixture[..., start:end]
+
+            if chunk.shape[-1] < self.model.n_fft:
+                chunk = torch.nn.functional.pad(chunk, (0, self.model.n_fft - chunk.shape[-1]))
             
             # Process chunk
             chunk_spec = self._compute_stft(chunk)
@@ -191,37 +194,44 @@ class Trainer:
         return output
     
     def _compute_stft(self, audio):
-        """Compute STFT with left-aligned windows for causality."""
+        """Compute STFT"""
         # Use left-aligned window (center=False for causal)
         spec = torch.stft(
             audio,
             n_fft=self.model.n_fft,
             hop_length=self.model.hop_length,
             window=self.model.window,
-            center=False,  # Causal
+            center=False,
             return_complex=True
         )
         
-        # Convert to (B, F, T, 2) format
-        spec = spec.permute(0, 1, 3, 2)  # (B, F, 2, T) -> (B, F, T, 2)
+        # Convert complex → real
+        spec = torch.view_as_real(spec)    # (B, F, T, 2)
+
+        # Ensure contiguous memory
+        spec = spec.contiguous()        
+
+        # # Convert to (B, F, T, 2) format
+        # spec = spec.permute(0, 1, 3, 2)  # (B, F, 2, T) -> (B, F, T, 2)
         
         return spec
     
     def _compute_istft(self, spec):
         """Compute inverse STFT."""
         # Convert from (B, F, T, 2) to (B, F, 2, T)
-        spec = spec.permute(0, 1, 3, 2)
+        # spec = spec.permute(0, 1, 3, 2)
         
         # Convert to complex
         spec_complex = torch.view_as_complex(spec.contiguous())
-        
+
+
         # ISTFT
         audio = torch.istft(
             spec_complex,
             n_fft=self.model.n_fft,
             hop_length=self.model.hop_length,
             window=self.model.window,
-            center=False  # Causal
+            center=False
         )
         
         return audio

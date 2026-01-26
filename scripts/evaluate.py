@@ -78,12 +78,17 @@ def process_audio(model, audio, chunk_size, device):
         hop_length=hop_length,
         window=model.window.to(device),
         center=False,
-        return_complex=False,
         return_complex=True
     )
-    
-    # Convert to (B, F, T, 2)
-    spec = spec.permute(0, 1, 3, 2)
+
+    # Convert complex → real
+    spec = torch.view_as_real(spec)  # (B, F, T, 2)
+
+    # Ensure contiguous memory
+    spec = spec.contiguous()
+        
+    # # Convert to (B, F, T, 2)
+    # spec = spec.permute(0, 1, 3, 2)
     
     # Process in chunks
     num_frames = spec.size(2)

@@ -40,8 +40,14 @@ def separate_audio(model, audio, device, chunk_size=256):
         return_complex=True
     )
     
-    # Convert to (B, F, T, 2)
-    spec = spec.permute(0, 1, 3, 2)
+    # Convert complex → real
+    spec = torch.view_as_real(spec)    # (B, F, T, 2)
+
+    # Ensure contiguous memory
+    spec = spec.contiguous()
+    
+    # # Convert to (B, F, T, 2)
+    # spec = spec.permute(0, 1, 3, 2)
     
     print(f"Spectrogram shape: {spec.shape}")
     

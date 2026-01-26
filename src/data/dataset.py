@@ -132,8 +132,8 @@ class MUSDB18Dataset(Dataset):
         """Load full song for testing."""
         song_dir = self.songs[idx]
         
-        vocals, sr = torchaudio.load(song_dir / 'vocals.wav')
-        mixture, _ = torchaudio.load(song_dir / 'mixture.wav')
+        vocals = self._load_audio(song_dir / 'vocals.wav')
+        mixture = self._load_audio(song_dir / 'mixture.wav')
         
         # Convert to mono
         if vocals.size(0) == 2:
