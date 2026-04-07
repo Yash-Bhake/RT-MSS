@@ -1,0 +1,54 @@
+# Causal BSRNN Configuration for Source Separation
+
+model:
+  n_fft: 1024
+  hop_length: 512       # Updated to 512 for stability (50% overlap)
+  feature_dim: 128
+  num_repeat: 6
+  hidden_dim: 128
+     
+data:
+  sample_rate: 44100
+  segment_length: 3.0   # seconds
+
+  # Dataset Strategy
+  use_same_data: true       # True: Cache the generated segments
+  overlap_percentage: 0.20   # Higher overlap = more target segments per song
+  vocal_threshold: 0.01     # Slightly lower to catch softer vocals
+
+  # Augmentation Configuration
+  use_augmentation: true
+  augmentation:
+    fine_tune_start_epoch_percent: 0.8   # Start fine-tuning at 80% of total epochs
+    # 1. Pitch Shift
+    pitch_shift_epoch_percent: 0.2   # First 20% of epochs
+    pitch_shift_prob: 0           
+    scale_shift_cent_range: 200      
+
+    # 2. Dynamic Mixing
+    dynamic_mix_prob: 0.95           
+    dynamic_mix_range_db: 3.0        
+
+    # 3. Stem Drop
+    stem_drop_prob: 0.10             
+
+training:
+  batch_size: 4           # Reduced slightly for Full Precision (No AMP)
+  num_workers: 4
+  num_epochs: 30
+  learning_rate: 0.001    # Lower LR for stability
+  max_grad_norm: 0.5      # Tight gradient clipping
+  early_stopping_patience: 10
+
+  loss_type: "hybrid"     # Options: "multidomain" or "hybrid"
+  alpha_time: 1.0         # Weight for time-domain loss
+  alpha_freq: 1.0         # Weight for frequency-domain loss
+  
+  checkpoint_dir: "checkpoints"
+  name: "bsrnn_experiment" # Tensorboard log name
+  device: "cuda"
+
+  # Validation Optimization
+  val_subset_size: 10      # Validate 15 songs per epoch
+  val_frequency: 1         # Validate every epoch
+  val_chunk_duration: 5.0  # Seconds of audio per GPU pass

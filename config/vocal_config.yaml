@@ -10,7 +10,7 @@ model:
 data:
   sample_rate: 44100
   segment_length: 3.0  # seconds
-  use_augmentation: false  # Set to true to enable augmentation
+  use_augmentation: true  # Set to true to enable augmentation
   
   augmentation:
     pitch_shift: false  # Enable pitch shifting
